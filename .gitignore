@@ -1,0 +1,36 @@
+# Build
+bin/
+obj/
+out/
+[Bb]uild/
+*.user
+*.suo
+*.userprefs
+
+# VS / Rider / Logs
+.vs/
+.idea/
+*.svclog
+*.pidb
+*.userosscache
+*.sln.docstates
+
+# Dotnet
+.project
+.ionide/
+*.nupkg
+*.snupkg
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tooling
+launchSettings.json
+
+# Our outputs
+output/
+
+# Local data files
+*.txt
+!README.md
