@@ -23,11 +23,23 @@ namespace WorkoutParserApp
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         static readonly Regex ExerciseLine = new(
-            @"^\s*(\d+[\).\s]+)?(?<name>[A-Za-z][A-Za-z0-9/\-\s&\(\)]+?)(?:\s*[:\-–])\s*(?<sets>.+)$",
+            @"^\s*(\d+[\).\s]+)?(?<name>[A-Za-z][A-Za-z0-9/\-\s&]+(?:\s*\([^)]+\))*)(?:\s*[:\-–,])\s*(?<sets>.+)$",
             RegexOptions.Compiled);
 
+        // Alternative pattern for exercises with inline weights like "Rope pushdowns (75lbs) x 15"
+        static readonly Regex ExerciseLineAlt = new(
+            @"^\s*(\d+[\).\s]+)?(?<name>[A-Za-z][A-Za-z0-9/\-\s&]+)\s+\((?<inlineweight>[^)]+)\)\s+(?<sets>.*[xX\d].*|AMRAP)$",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
         static readonly Regex SetToken = new(
-            @"(?:(?<sets>\d+)\s*[xX]\s*(?<reps>\d+)\s*(?:@|\bat\b)\s*(?<weight>\d+(?:\.\d+)?)\s*(?<unit>lbs?|s|kg)|(?<onlyreps>\d+)\s*(?:reps?)|\bAMRAP\b|(?:(?<reps2>\d+)\s*[xX]\s*(?<amrap>AMRAP))|@?\s*(?<wonly>\d+(?:\.\d+)?)\s*(?<uonly>lbs?|s|kg))",
+            @"(?:(?<weight3>\d+)s\s+(?<sets3>\d+)\s*[xX]\s*(?<reps4>\d+)" + // 100s 3 x 6 (dumbbell shorthand with sets)
+            @"|(?<sets>\d+)\s*[xX]\s*(?<reps>\d+)\s*(?:@|\bat\b)\s*(?<weight>\d+(?:\.\d+)?)\s*(?<unit>lbs?|kg)" + // 3 x 12 @ 100 lbs
+            @"|(?<sets2>\d+)\s*[xX]\s*(?<reps3>\d+)(?!\s*@)" + // 3 x 12 (no weight)
+            @"|(?<weight2>\d+)s\b" + // 100s (dumbbell shorthand standalone)
+            @"|(?<onlyreps>\d+)\s*(?:reps?)" + // 12 reps
+            @"|\bAMRAP\b" + // AMRAP
+            @"|(?:(?<reps2>\d+)\s*[xX]\s*(?<amrap>AMRAP))" + // 12 x AMRAP
+            @"|@\s*(?<wonly>\d+(?:\.\d+)?)\s*(?<uonly>lbs?|kg))", // @ 100 lbs
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         static readonly Regex PlanCue = new(
@@ -124,10 +136,17 @@ namespace WorkoutParserApp
             var workoutsPath = GetUniquePath(Path.Combine(outDir, $"workouts_{stamp}.csv"));
             var setsPath = GetUniquePath(Path.Combine(outDir, $"sets_{stamp}.csv"));
 
-            WriteWorkoutsCsv(workoutsPath, sessions);
-            WriteSetsCsv(setsPath, setRows);
             // -- Post-process labels to eliminate "Exercise N", "Round 1", "Low", "Chest" as standalone names
             PostProcessExerciseNames(setRows);
+
+            // -- Normalize exercise names for consistent grouping
+            NormalizeExerciseNames(setRows);
+
+            // -- Filter out junk data
+            setRows = FilterJunkExercises(setRows);
+
+            WriteWorkoutsCsv(workoutsPath, sessions);
+            WriteSetsCsv(setsPath, setRows);
 
             var previewPath = Path.Combine(outDir, $"_debug_names_{stamp}.txt");
             File.WriteAllLines(previewPath, setRows.Select(r => r.ExerciseName));
@@ -326,6 +345,21 @@ namespace WorkoutParserApp
                     continue;
                 }
 
+                // Case 1b: Alternative format "Name (weight) sets" like "Rope pushdowns (75lbs) x 15"
+                var mAlt = ExerciseLineAlt.Match(line);
+                if (mAlt.Success)
+                {
+                    var name = mAlt.Groups["name"].Value.Trim();
+                    var inlineWeight = mAlt.Groups["inlineweight"].Value;
+                    var setsBlob = inlineWeight + " " + mAlt.Groups["sets"].Value;
+
+                    currentName = name; // latch the name
+
+                    var (sets, notes) = ParseSetsBlob(setsBlob);
+                    exercises.Add(new ExerciseParsed(currentName, sets, notes));
+                    continue;
+                }
+
                 // Case 2: Name-only line (no sets yet) -> just update currentName, wait for sets
                 if (LooksLikeNameOnly(line))
                 {
@@ -374,19 +408,52 @@ namespace WorkoutParserApp
                 double? weight = null;
                 string unit = "";
                 bool isAmrap = false;
+                int numSets = 1;
 
-                if (int.TryParse(sm.Groups["reps"].Value, out var r1)) reps = r1;
-                if (int.TryParse(sm.Groups["onlyreps"].Value, out var rOnly)) reps = rOnly;
-                if (int.TryParse(sm.Groups["reps2"].Value, out var r2)) reps = r2;
+                // Check for "100s 3 x 6" pattern (dumbbell shorthand with sets)
+                if (int.TryParse(sm.Groups["sets3"].Value, out var s3))
+                {
+                    numSets = s3;
+                    if (int.TryParse(sm.Groups["reps4"].Value, out var r4)) reps = r4;
+                    if (double.TryParse(sm.Groups["weight3"].Value, out var w4))
+                    {
+                        weight = w4;
+                        unit = "lbs"; // "100s" notation implies pounds
+                    }
+                }
+                else
+                {
+                    // Check for other "N x M" patterns that need expansion
+                    if (int.TryParse(sm.Groups["sets"].Value, out var s1)) numSets = s1;
+                    if (int.TryParse(sm.Groups["sets2"].Value, out var s2)) numSets = s2;
 
-                if (double.TryParse(sm.Groups["weight"].Value, out var w1)) weight = w1;
-                if (double.TryParse(sm.Groups["wonly"].Value, out var w2)) weight = w2;
+                    if (int.TryParse(sm.Groups["reps"].Value, out var r1)) reps = r1;
+                    if (int.TryParse(sm.Groups["onlyreps"].Value, out var rOnly)) reps = rOnly;
+                    if (int.TryParse(sm.Groups["reps2"].Value, out var r2)) reps = r2;
+                    if (int.TryParse(sm.Groups["reps3"].Value, out var r3)) reps = r3;
 
-                unit = FirstNonEmpty(sm.Groups["unit"].Value, sm.Groups["uonly"].Value);
+                    if (double.TryParse(sm.Groups["weight"].Value, out var w1)) weight = w1;
+                    if (double.TryParse(sm.Groups["wonly"].Value, out var w2)) weight = w2;
+                    if (double.TryParse(sm.Groups["weight2"].Value, out var w3))
+                    {
+                        weight = w3;
+                        unit = "lbs"; // "100s" notation implies pounds
+                    }
+
+                    if (string.IsNullOrEmpty(unit))
+                        unit = FirstNonEmpty(sm.Groups["unit"].Value, sm.Groups["uonly"].Value);
+                }
+
                 if (sm.Groups["amrap"].Success) isAmrap = true;
 
                 if (reps.HasValue || weight.HasValue || isAmrap)
-                    sets.Add(new SetParsed(reps, weight, unit, isAmrap, ""));
+                {
+                    // Expand "N x M" into N individual sets
+                    for (int i = 0; i < numSets; i++)
+                    {
+                        sets.Add(new SetParsed(reps, weight, unit, isAmrap, ""));
+                    }
+                }
                 else
                     notes.Append(sm.Value).Append(' ');
             }
@@ -413,12 +480,17 @@ namespace WorkoutParserApp
             // throw away obvious non-sets that fooled us
             if (Regex.IsMatch(s, @"^\s*sets?\s*$", RegexOptions.IgnoreCase)) return false;
 
+            // Reject standalone "x NN" patterns without an exercise name (likely finisher sub-rounds)
+            if (Regex.IsMatch(s, @"^x\s+\d+", RegexOptions.IgnoreCase)) return false;
+
             return
                 // 3 x 12 / 3x12 patterns
                 Regex.IsMatch(s, @"\b\d+\s*[xX]\s*\d+\b") ||
-                // weights or units
-                Regex.IsMatch(s, @"@\s*\d+(?:\.\d+)?\s*(lbs?|kg|s)\b", RegexOptions.IgnoreCase) ||
-                Regex.IsMatch(s, @"\b\d+(?:\.\d+)?\s*(lbs?|kg|s)\b", RegexOptions.IgnoreCase) ||
+                // weights or units (removed standalone "s" to avoid matching "3 sets")
+                Regex.IsMatch(s, @"@\s*\d+(?:\.\d+)?\s*(lbs?|kg)\b", RegexOptions.IgnoreCase) ||
+                Regex.IsMatch(s, @"\b\d+(?:\.\d+)?\s*(lbs?|kg)\b", RegexOptions.IgnoreCase) ||
+                // dumbbell shorthand like "100s"
+                Regex.IsMatch(s, @"\b\d+s\b", RegexOptions.IgnoreCase) ||
                 // simple reps lists: 11, 8, 6
                 Regex.IsMatch(s, @"\b\d+\s*,\s*\d+(?:\s*,\s*\d+)+\b") ||
                 // AMRAP tokens
@@ -452,6 +524,14 @@ namespace WorkoutParserApp
             if (Regex.IsMatch(s, @"^worked\s+out\s+from\b", RegexOptions.IgnoreCase)) return true;
             if (Regex.IsMatch(s, @"^today\s+is\b|^here\s+is\s+what\s+i\s+did\s+on\b", RegexOptions.IgnoreCase)) return true;
             if (Regex.IsMatch(s, @"^\s*sets?\s*$", RegexOptions.IgnoreCase)) return true;
+            if (Regex.IsMatch(s, @"^(superset|giant\s+set|end\s+superset|finisher|bodyweight\s+finisher)\b.*\d+\s+rounds?", RegexOptions.IgnoreCase)) return true;
+            if (Regex.IsMatch(s, @"^(end\s+superset|💡|rounds?:?)$", RegexOptions.IgnoreCase)) return true;
+
+            // Round/Set headers with metadata like "Round 1: 97lb KB right / 50lb KB left" or "Round 2: Swap sides"
+            if (Regex.IsMatch(s, @"^(round|set)\s+\d+:\s+(swap|repeat|.*\bKB\b|.*\bsides?\b)", RegexOptions.IgnoreCase)) return true;
+
+            // Date-only lines like "August 1, 12:54 - 2:03 p.m." - the date parser will handle these
+            if (Regex.IsMatch(s, @"^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}[,\s]", RegexOptions.IgnoreCase)) return true;
 
             // pure qualifier headers (Chest / Low / High / Wide / Neutral / Single / One / Straight / Behind)
             if (IsPureQualifier(s)) return true;
@@ -570,7 +650,8 @@ namespace WorkoutParserApp
         static readonly HashSet<string> Qualifiers = new(StringComparer.OrdinalIgnoreCase)
 {
     "low","high","wide","narrow","neutral","single","one","straight","behind","chest",
-    "round 1","round 2","round 3","round 4","set 1","set 2","set 3","set 4","superset","giant set","finisher"
+    "round 1","round 2","round 3","round 4","set 1","set 2","set 3","set 4","superset","giant set","finisher",
+    "theme","avoids","goal","supported","sets","reps","lat","incline"
 };
 
         static readonly Regex PlaceholderNameRx = new(@"^Exercise\s+\d+$", RegexOptions.IgnoreCase);
@@ -589,9 +670,13 @@ namespace WorkoutParserApp
             // Common single-word/section qualifiers that shouldn't stand alone
             if (Qualifiers.Contains(name.Trim())) return true;
 
+            // Incomplete hyphenated fragments like "Low-to", "Behind-the", ending with hyphen + article/preposition
+            if (Regex.IsMatch(name, @"-(to|the|a|an|of|with|for|from|by|at)$", RegexOptions.IgnoreCase))
+                return true;
+
             // Very short fragments that are almost surely qualifiers
             if (!name.Contains(' ') && name.Length <= 8 &&
-                Regex.IsMatch(name, @"^(low|high|wide|narrow|neutral|single|one|straight|behind|chest)$", RegexOptions.IgnoreCase))
+                Regex.IsMatch(name, @"^(low|high|wide|narrow|neutral|single|one|straight|behind|chest|superset)$", RegexOptions.IgnoreCase))
                 return true;
 
             return false;
@@ -617,12 +702,12 @@ namespace WorkoutParserApp
             // tolerate short fragments and common qualifiers
             if (Qualifiers.Contains(s)) return true;
 
-            // Allow “Round 1”, “Set 2” variants
+            // Allow "Round 1", "Set 2" variants
             if (Regex.IsMatch(s, @"^(round|set)\s*\d+$", RegexOptions.IgnoreCase)) return true;
 
             // Single-word short fragments like "Low", "Wide", "Neutral", "Single", "Straight", "Behind"
-            if (!s.Contains(' ') && s.Length <= 8 &&
-                Regex.IsMatch(s, @"^(low|high|wide|narrow|neutral|single|one|straight|behind|chest)$", RegexOptions.IgnoreCase))
+            if (!s.Contains(' ') && s.Length <= 10 &&
+                Regex.IsMatch(s, @"^(low|high|wide|narrow|neutral|single|one|straight|behind|chest|theme|avoids|goal|supported|sets|reps)$", RegexOptions.IgnoreCase))
                 return true;
 
             return false;
@@ -689,7 +774,7 @@ namespace WorkoutParserApp
         // Also folds simple qualifiers into the previous name.
         static void PostProcessExerciseNames(List<SetRow> rows)
         {
-            // Process in-session order so “last real name” makes sense
+            // Process in-session order so "last real name" makes sense
             rows.Sort((a, b) =>
             {
                 int s = string.Compare(a.SessionId, b.SessionId, StringComparison.Ordinal);
@@ -732,6 +817,229 @@ namespace WorkoutParserApp
                     lastRealName = name;
                 }
             }
+        }
+
+        // Normalize exercise names for consistent grouping in visualizations
+        static void NormalizeExerciseNames(List<SetRow> rows)
+        {
+            for (int i = 0; i < rows.Count; i++)
+            {
+                var r = rows[i];
+                var normalized = NormalizeSingleExerciseName(r.ExerciseName);
+                if (normalized != r.ExerciseName)
+                {
+                    rows[i] = r with { ExerciseName = normalized };
+                }
+            }
+        }
+
+        static string NormalizeSingleExerciseName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return name;
+
+            var normalized = name;
+
+            // Step 1: Extract and remove parenthetical details (we'll discard them for canonical name)
+            var mainName = Regex.Replace(normalized, @"\s*\([^)]*\)\s*", " ").Trim();
+
+            // Step 2: Expand common abbreviations
+            mainName = Regex.Replace(mainName, @"\bDB\b", "Dumbbell", RegexOptions.IgnoreCase);
+            mainName = Regex.Replace(mainName, @"\bBB\b", "Barbell", RegexOptions.IgnoreCase);
+            mainName = Regex.Replace(mainName, @"\bEZ\b", "EZ Bar", RegexOptions.IgnoreCase);
+
+            // Step 3: Normalize to Title Case
+            mainName = ToTitleCase(mainName);
+
+            // Step 4: Clean up multiple spaces
+            mainName = Regex.Replace(mainName, @"\s+", " ").Trim();
+
+            // Step 5: Apply canonical name mappings for common exercises
+            mainName = ApplyCanonicalMapping(mainName);
+
+            return mainName;
+        }
+
+        static string ToTitleCase(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return text;
+
+            var words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            var titleCased = new List<string>();
+
+            foreach (var word in words)
+            {
+                if (word.Length == 0) continue;
+
+                // Keep acronyms uppercase (like "EZ", "T-Bar")
+                if (word.All(c => char.IsUpper(c) || c == '-'))
+                {
+                    titleCased.Add(word);
+                }
+                else
+                {
+                    titleCased.Add(char.ToUpper(word[0]) + word.Substring(1).ToLower());
+                }
+            }
+
+            return string.Join(" ", titleCased);
+        }
+
+        static string ApplyCanonicalMapping(string name)
+        {
+            // Dictionary of normalized patterns -> canonical names
+            var canonicalMappings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                // Incline press variations
+                ["Incline Dumbbell Press"] = "Incline Dumbbell Press",
+                ["Incline Dumbbell Bench"] = "Incline Dumbbell Press",
+                ["Incline Dumbbell Bench Press"] = "Incline Dumbbell Press",
+
+                // Flat press variations
+                ["Flat Dumbbell Press"] = "Flat Dumbbell Press",
+                ["Flat Dumbbell Bench"] = "Flat Dumbbell Press",
+                ["Flat Dumbbell Bench Press"] = "Flat Dumbbell Press",
+                ["Dumbbell Bench Press"] = "Flat Dumbbell Press",
+
+                // Overhead press variations
+                ["Barbell Overhead Press"] = "Barbell Overhead Press",
+                ["Overhead Barbell Press"] = "Barbell Overhead Press",
+                ["Standing Barbell Overhead Press"] = "Barbell Overhead Press",
+
+                ["Dumbbell Overhead Press"] = "Dumbbell Overhead Press",
+                ["Overhead Dumbbell Press"] = "Dumbbell Overhead Press",
+                ["Seated Dumbbell Overhead Press"] = "Seated Dumbbell Overhead Press",
+                ["Standing Dumbbell Overhead Press"] = "Standing Dumbbell Overhead Press",
+
+                ["Dumbbell Shoulder Press"] = "Dumbbell Shoulder Press",
+                ["Seated Dumbbell Shoulder Press"] = "Seated Dumbbell Shoulder Press",
+                ["Standing Dumbbell Shoulder Press"] = "Standing Dumbbell Shoulder Press",
+
+                // Lateral raise variations
+                ["Dumbbell Lateral Raises"] = "Dumbbell Lateral Raises",
+                ["Dumbbell Lateral Raise"] = "Dumbbell Lateral Raises",
+                ["Lateral Raises"] = "Dumbbell Lateral Raises",
+                ["Lateral Raise"] = "Dumbbell Lateral Raises",
+                ["Seated Dumbbell Lateral Raises"] = "Seated Dumbbell Lateral Raises",
+                ["Seated Dumbbell Lateral Raise"] = "Seated Dumbbell Lateral Raises",
+                ["Cable Lateral Raises"] = "Cable Lateral Raises",
+                ["Cable Lateral Raise"] = "Cable Lateral Raises",
+
+                // Pullup variations
+                ["Pullups"] = "Pullups",
+                ["Pull Ups"] = "Pullups",
+                ["Pull-Ups"] = "Pullups",
+                ["Weighted Pullups"] = "Weighted Pullups",
+                ["Weighted Pull Ups"] = "Weighted Pullups",
+                ["Neutral Grip Pullups"] = "Neutral Grip Pullups",
+
+                // Dip variations
+                ["Dips"] = "Dips",
+                ["Weighted Dips"] = "Weighted Dips",
+
+                // Row variations
+                ["Pendlay Rows"] = "Pendlay Rows",
+                ["Pendlay Row"] = "Pendlay Rows",
+                ["Cable Rows"] = "Cable Rows",
+                ["Cable Row"] = "Cable Rows",
+                ["Seated Cable Rows"] = "Seated Cable Rows",
+                ["Chest Supported Dumbbell Rows"] = "Chest Supported Dumbbell Rows",
+                ["Incline Chest Supported Dumbbell Rows"] = "Incline Chest Supported Dumbbell Rows",
+                ["Chest-Supported T-Bar Rows"] = "Chest Supported T-Bar Rows",
+                ["Chest Supported T-Bar Rows"] = "Chest Supported T-Bar Rows",
+                ["Supported T-Bar Rows"] = "Chest Supported T-Bar Rows",
+                ["One-Arm Cable Rows"] = "One-Arm Cable Rows",
+                ["One Arm Cable Rows"] = "One-Arm Cable Rows",
+
+                // Curl variations
+                ["Incline Dumbbell Curls"] = "Incline Dumbbell Curls",
+                ["Incline Dumbbell Curl"] = "Incline Dumbbell Curls",
+                ["EZ Bar Preacher Curls"] = "EZ Bar Preacher Curls",
+                ["EZ Bar Preacher Curl"] = "EZ Bar Preacher Curls",
+                ["Preacher Curls"] = "Preacher Curls",
+                ["EZ Bar Reverse Curls"] = "EZ Bar Reverse Curls",
+                ["Reverse EZ Bar Curls"] = "EZ Bar Reverse Curls",
+                ["Zottman Curls"] = "Zottman Curls",
+                ["Zottman Curl"] = "Zottman Curls",
+
+                // Tricep variations
+                ["Tricep Pushdowns"] = "Tricep Pushdowns",
+                ["Tricep Pushdown"] = "Tricep Pushdowns",
+                ["Tricep Rope Pushdowns"] = "Tricep Rope Pushdowns",
+                ["V-Bar Pushdowns"] = "V-Bar Pushdowns",
+                ["Overhead Rope Extensions"] = "Overhead Rope Extensions",
+                ["Skullcrushers"] = "Skullcrushers",
+                ["Skullcrusher"] = "Skullcrushers",
+
+                // Chest fly variations
+                ["Cable Chest Flys"] = "Cable Chest Flys",
+                ["Cable Chest Fly"] = "Cable Chest Flys",
+                ["Seated Cable Chest Flys"] = "Seated Cable Chest Flys",
+                ["Seated Chest Cable Flys"] = "Seated Cable Chest Flys",
+                ["Standing Chest Cable Flys"] = "Standing Cable Chest Flys",
+                ["Incline Cable Flys"] = "Incline Cable Flys",
+                ["Low-To-High Cable Flys"] = "Low-To-High Cable Flys",
+
+                // Rear delt variations
+                ["Dumbbell Rear Delt Flys"] = "Dumbbell Rear Delt Flys",
+                ["Dumbbell Rear Delt Fly"] = "Dumbbell Rear Delt Flys",
+                ["Reverse Pec Deck"] = "Reverse Pec Deck",
+
+                // Shrug variations
+                ["Dumbbell Shrugs"] = "Dumbbell Shrugs",
+                ["Dumbbell Shrug"] = "Dumbbell Shrugs",
+
+                // Misc
+                ["Facepulls"] = "Face Pulls",
+                ["Facepull"] = "Face Pulls",
+                ["Face Pulls"] = "Face Pulls",
+                ["Ab Roller"] = "Ab Roller",
+                ["Ab Crunch"] = "Ab Crunch",
+                ["Hanging Leg Raises"] = "Hanging Leg Raises",
+                ["Hanging Leg Raise"] = "Hanging Leg Raises",
+                ["Diamond Pushups"] = "Diamond Pushups",
+                ["Diamond Pushup"] = "Diamond Pushups",
+                ["Arnold Press"] = "Arnold Press",
+                ["Arnolds"] = "Arnold Press",
+            };
+
+            if (canonicalMappings.TryGetValue(name, out var canonical))
+            {
+                return canonical;
+            }
+
+            return name;
+        }
+
+        // Filter out junk exercises that shouldn't be in the dataset
+        static List<SetRow> FilterJunkExercises(List<SetRow> rows)
+        {
+            var filtered = rows.Where(r =>
+            {
+                var name = r.ExerciseName?.Trim() ?? "";
+
+                // Filter out obvious junk
+                if (string.IsNullOrWhiteSpace(name)) return false;
+                if (name.Equals("Unknown Exercise", StringComparison.OrdinalIgnoreCase)) return false;
+                if (name.Equals("Option 2", StringComparison.OrdinalIgnoreCase)) return false;
+                if (name.Equals("Absolutely", StringComparison.OrdinalIgnoreCase)) return false;
+                if (name.Equals("One", StringComparison.OrdinalIgnoreCase)) return false;
+
+                // Filter out AI response artifacts (long instructional text)
+                if (name.Length > 100) return false;
+
+                // Filter out single-word qualifiers
+                if (!name.Contains(' ') && name.Length <= 10 &&
+                    Regex.IsMatch(name, @"^(chest|back|legs|arms|shoulders|abs|cardio|theme|avoids|goal)$", RegexOptions.IgnoreCase))
+                    return false;
+
+                // Keep rows that have at least reps or weight data
+                if (!r.Reps.HasValue && !r.Weight.HasValue && string.IsNullOrWhiteSpace(r.Notes))
+                    return false;
+
+                return true;
+            }).ToList();
+
+            return filtered;
         }
 
 
