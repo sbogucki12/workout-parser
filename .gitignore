@@ -34,3 +34,6 @@ output/
 # Local data files
 *.txt
 !README.md
+
+# Documentation media (allow images for README)
+!media/

@@ -33,6 +33,8 @@ I had a long, messy conversation where the AI suggests workouts and I reply with
 - ✅ **Data quality filtering**: Removed 42% junk data (AI artifacts, invalid entries)
 - ✅ **Improved data completeness**: 93% increase in rows with both reps AND weight (6.9% → 13.3%)
 - ✅ **Enhanced pattern recognition**: Better handling of "100s 3 x 6" dumbbell notation
+- ✅ **Added Python visualization toolkit**: Interactive HTML charts with pandas + plotly for instant insights
+- ✅ **6 pre-built visualizations**: Volume analysis, frequency tracking, progression charts, and summary dashboards
 
 ## Output schema
 
@@ -46,18 +48,63 @@ session_id,session_date,start_time,end_time,title,source_note
 session_id,exercise_order,exercise_name,set_order,reps,weight,unit,amrap,notes
 
 ## Running it (Visual Studio or CLI)
-- **VS 2022 / .NET 8:** set the command-line arg to the full path of your log (e.g., `C:\Users\<you>\workoutlog_oct2025.txt`) and press F5.  
+- **VS 2022 / .NET 8:** set the command-line arg to the full path of your log (e.g., `C:\Users\<you>\workoutlog_oct2025.txt`) and press F5.
 - **CLI:**
 ```bash
 dotnet build
 dotnet run -- "C:\full\path\to\workoutlog_oct2025.txt"
 ```
 
+## Visualizing your data
+
+After parsing and optionally cleaning your CSV output, generate interactive visualizations using the included Python script:
+
+### Quick Start
+```bash
+# Install dependencies
+pip install pandas plotly
+
+# Generate visualizations (uses output/sets_*_clean.csv by default)
+python visualize.py
+
+# Or specify a custom CSV path
+python visualize.py path/to/your/sets.csv
+```
+
+### What you get
+The script creates 6 interactive HTML charts in `output/visualizations/`:
+- **Top exercises by volume** - Bar chart of your highest-volume exercises (reps × weight)
+- **Workout frequency** - Weekly workout consistency over time
+- **Exercise progression** - Volume trends for your top 5 exercises
+- **Sets distribution** - How many sets you typically do per workout
+- **Exercise frequency** - Which exercises appear most often in your routine
+- **Summary dashboard** - Multi-metric overview of your training
+
+### Example Visualizations
+
+**Top Exercises by Total Volume**
+
+![Top Exercises by Volume](media/total_volume.jpg)
+
+**Workout Frequency & Exercise Progression**
+
+![Frequency Analysis](media/frequency.jpg)
+
+**Summary Dashboard with Multiple Metrics**
+
+![Various Metrics](media/various.jpg)
+
+All charts are fully interactive - hover for details, zoom, pan, and filter. Perfect for identifying trends, tracking progress, and sharing your fitness journey.
+
+See [README_VISUALIZATIONS.md](README_VISUALIZATIONS.md) for detailed documentation.
+
 ## File placement
 
 Your log: anywhere. The program accepts a full path.
 
 Outputs: output/ (created next to your input file) with timestamped filenames.
+
+Visualizations: output/visualizations/ (interactive HTML files)
 
 Key design choices
 

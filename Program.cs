@@ -43,14 +43,38 @@ namespace WorkoutParserApp
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         static readonly Regex PlanCue = new(
-            @"\b(provide|recommend|suggest|tonight'?s\s+workout|plan\s+tonight|what\s+should\s+i\s+do|please\s+plan|it\s+doesn'?t\s+have\s+to|avoid\s+legs)\b",
+            @"\b(provide|recommend|suggest|tonight'?s\s+workout|plan\s+tonight|what\s+should\s+i\s+do|please\s+plan|it\s+doesn'?t\s+have\s+to|avoid\s+legs|suggested\s+plan|next\s+push|next\s+pull|recommended\s+adjustments|progression\s+strategy|performance|takeaway|rationale|strategy|why\s+this|why\s+it|analysis|breakdown)\b|what['']?s\s+working|exercise\s+\t\s*performance\s+\t\s*takeaway",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         static readonly Regex YouSaid = new(@"^\s*You said:\s*", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        static readonly Regex ChatGPTSaid = new(@"^\s*ChatGPT said:\s*", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         // ---------------- Entry ----------------
         static void Main(string[] args)
         {
+            // Check if user wants to visualize existing data
+            if (args.Length > 0 && args[0] == "--visualize")
+            {
+                var outputDir = Path.Combine(
+                    Path.GetDirectoryName(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile))!,
+                    "Documents", "Repos", "fitness", "chagpt", "WorkoutParser", "output"
+                );
+
+                var vizSetsPath = args.Length > 1 ? args[1] : Path.Combine(outputDir, "sets_20251017_clean.csv");
+                var vizWorkoutsPath = vizSetsPath.Replace("sets_", "workouts_").Replace("_clean", "_20251017_113224");
+
+                if (!File.Exists(vizSetsPath))
+                {
+                    Console.Error.WriteLine($"Sets file not found: {vizSetsPath}");
+                    Console.Error.WriteLine("Usage: dotnet run -- --visualize [path/to/sets.csv]");
+                    return;
+                }
+
+                var vizOutputDir = Path.Combine(outputDir, "visualizations");
+                Visualizer.GenerateVisualizations(vizSetsPath, vizWorkoutsPath, vizOutputDir);
+                return;
+            }
+
             // Resolve the input path (allow default file when no args)
             string path;
             if (args.Length == 0)
@@ -64,6 +88,7 @@ namespace WorkoutParserApp
                 if (!File.Exists(candidate))
                 {
                     Console.Error.WriteLine("Usage: dotnet run -- \"C:\\full\\path\\to\\workoutlog_oct2025.txt\"");
+                    Console.Error.WriteLine("   or: dotnet run -- --visualize [path/to/sets.csv]");
                     Console.Error.WriteLine($"(Tried default: {candidate})");
                     return;
                 }
@@ -159,9 +184,6 @@ namespace WorkoutParserApp
             Console.WriteLine($"  {workoutsPath}");
             Console.WriteLine($"  {setsPath}");
 
-
-            Console.WriteLine($"Parsed {sessions.Count} workout sessions.");
-            Console.WriteLine($"Output written:\n  {Path.Combine(dir, "workouts.csv")}\n  {Path.Combine(dir, "sets.csv")}");
         }
 
         // ---------------- Models ----------------
@@ -196,7 +218,8 @@ namespace WorkoutParserApp
             {
                 var line = raw.TrimEnd();
 
-                if (string.IsNullOrWhiteSpace(line) || YouSaid.IsMatch(line))
+                // Split on blank lines, "You said:", or "ChatGPT said:"
+                if (string.IsNullOrWhiteSpace(line) || YouSaid.IsMatch(line) || ChatGPTSaid.IsMatch(line))
                 {
                     if (sb.Length > 0)
                     {
@@ -209,6 +232,7 @@ namespace WorkoutParserApp
                         if (!string.IsNullOrWhiteSpace(stripped))
                             sb.AppendLine(stripped);
                     }
+                    // Note: We don't start a new block with "ChatGPT said:" content - we just split here
                     continue;
                 }
 
@@ -225,7 +249,9 @@ namespace WorkoutParserApp
             var looksLikeExercises = block.Split('\n').Count(l =>
                 ExerciseLine.IsMatch(l) || Regex.IsMatch(l, @"\b\d+\s*[xX]\s*\d+|\bAMRAP\b|\b(lbs?|kg|@)\b")) >= 2;
 
-            var isPlan = PlanCue.IsMatch(block) && !Regex.IsMatch(block, @"\bhere\s+(is|was)\b.*\bworkout\b", RegexOptions.IgnoreCase);
+            // Only check for plan cues in the first 10 lines to avoid false positives from ChatGPT responses
+            var firstLines = string.Join("\n", block.Split('\n').Take(10));
+            var isPlan = PlanCue.IsMatch(firstLines) && !Regex.IsMatch(firstLines, @"\bhere\s+(is|was)\b.*\bworkout\b", RegexOptions.IgnoreCase);
 
             return (looksLikeExercises || hasTimeRange || hasHeaderHint) && !isPlan;
         }
